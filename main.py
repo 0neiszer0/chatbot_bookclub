@@ -16,7 +16,7 @@ async def kakao_response(request: Request):
             "outputs": [
                 {
                     "simpleText": {
-                        "text": "안녕! 파이썬 서버와 성공적으로 연결되었어! 🚀"
+                        "text": "안녕! 파이썬 서버와 성공적으로 연결되었어!! 🚀"
                     }
                 }
             ]
