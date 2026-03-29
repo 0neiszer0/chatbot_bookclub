@@ -20,10 +20,30 @@ SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 
+# 💡 일반 텍스트 + 메시지 버튼 응답용
 def make_kakao_response(text: str, quick_replies: list = None):
     response = {"version": "2.0", "template": {"outputs": [{"simpleText": {"text": text}}]}}
     if quick_replies: response["template"]["quickReplies"] = quick_replies
     return response
+
+
+# 💡 [핵심] 텍스트 + 예쁜 웹 링크 버튼 카드 응답용! (이게 있어야 링크가 보입니다)
+def make_kakao_link_response(text: str, button_label: str, url: str):
+    return {
+        "version": "2.0",
+        "template": {
+            "outputs": [
+                {"simpleText": {"text": text}},
+                {
+                    "textCard": {
+                        "title": "🔗 웹페이지 이동",
+                        "description": "아래 버튼을 눌러주세요.",
+                        "buttons": [{"action": "webLink", "label": button_label, "webLinkUrl": url}]
+                    }
+                }
+            ]
+        }
+    }
 
 
 def get_kst_now(): return datetime.datetime.utcnow() + datetime.timedelta(hours=9)
@@ -67,7 +87,7 @@ def kakao_bot_main(body: dict):
                 return make_kakao_response("⛔ 운영진(관리자) 전용 기능입니다.")
 
         # ==========================================
-        # 📖 일반 부원 가이드 (완전판)
+        # 📖 일반 부원 가이드
         # ==========================================
         if intent_name == "도움말":
             guide_msg = (
@@ -93,18 +113,18 @@ def kakao_bot_main(body: dict):
             return make_kakao_response(guide_msg, replies)
 
         # ==========================================
-        # 👑 관리자 전용 기능들 (완전판)
+        # 👑 관리자 전용 기능들
         # ==========================================
         if intent_name == "관리자":
             admin_guide = (
                 "👑 [운영진 전체 명령어 가이드] 👑\n\n"
                 "1️⃣ [세미나생성]\n"
                 "▪️ 이번 주 세미나(월/목) 예약을 오픈합니다. (금 18:00 ~ 일 23:59 자동설정)\n\n"
-                "2️⃣ [수동관리] ⭐️NEW!\n"
+                "2️⃣ [수동관리]\n"
                 "▪️ 결석자 발생 시 관리자가 웹에서 직접 부원을 '추가/삭제'할 수 있습니다.\n\n"
                 "3️⃣ [조편성]\n"
                 "▪️ 1만 회 시뮬레이션으로 최적 조를 짜고 웹에서 핀셋 수정(이동)합니다.\n\n"
-                "4️⃣ [발제문보기] ⭐️NEW!\n"
+                "4️⃣ [발제문보기]\n"
                 "▪️ 이번 주 제출된 발제문들을 웹에서 모아보고 워드 파일로 다운받습니다.\n\n"
                 "5️⃣ [명단확인]\n"
                 "▪️ 이번 주 확정자 명단을 카톡 텍스트로 뽑습니다.\n\n"
@@ -121,16 +141,24 @@ def kakao_bot_main(body: dict):
 
         elif intent_name == "수동관리":
             url = f"{get_server_host()}/admin/manual_manage?admin_key={SUPABASE_KEY[:10]}"
-            replies = [{"label": "🛠️ 수동 관리 웹 열기", "action": "webLink", "webLinkUrl": url}]
-            return make_kakao_response("✅ 이번 주 참석자를 수동으로 추가하거나 삭제할 수 있는 페이지입니다.", replies)
+            return make_kakao_link_response("✅ 이번 주 참석자를 수동으로 추가하거나 삭제할 수 있는 페이지입니다.", "🛠️ 수동 관리 웹 열기", url)
 
         elif intent_name == "발제문보기":
             url = f"{get_server_host()}/admin/current_topics?admin_key={SUPABASE_KEY[:10]}"
-            replies = [{"label": "📚 현재 발제문 확인", "action": "webLink", "webLinkUrl": url}]
-            return make_kakao_response("✅ 이번 주에 제출된 발제문들을 실시간으로 확인하고 워드로 다운받으세요!", replies)
+            return make_kakao_link_response("✅ 이번 주에 제출된 발제문들을 실시간으로 확인하고 워드로 다운받으세요!", "📚 현재 발제문 확인", url)
+
+        elif intent_name == "기록열람":
+            url = f"{get_server_host()}/admin/history?admin_key={SUPABASE_KEY[:10]}"
+            return make_kakao_link_response("✅ 과거 기록 확인 및 워드 다운로드 페이지입니다.", "📋 기록 열람 페이지 오픈", url)
 
         elif intent_name == "세미나생성":
             week_name = params.get("week_name", "새로운 주차")
+
+            # 🚨 [핵심] 동일한 주차 중복 생성 방지 로직!
+            existing = supabase.table("seminars").select("id").eq("week_name", week_name).execute()
+            if existing.data:
+                return make_kakao_response(f"⛔ 이미 '{week_name}'(으)로 생성된 세미나가 존재합니다.\n다른 주차 이름을 입력해 주세요!")
+
             now_kst = get_kst_now()
             days_to_friday = (4 - now_kst.weekday()) % 7
             if days_to_friday == 0 and now_kst.hour >= 18: days_to_friday = 7
@@ -166,11 +194,6 @@ def kakao_bot_main(body: dict):
                     thu_list.append(f"{name}{team}")
             return make_kakao_response(
                 f"📋 [이번 주 확정 명단]\n\n[월요일]\n{', '.join(mon_list) if mon_list else '없음'}\n\n[목요일]\n{', '.join(thu_list) if thu_list else '없음'}")
-
-        elif intent_name == "기록열람":
-            history_url = f"{get_server_host()}/admin/history?admin_key={SUPABASE_KEY[:10]}"
-            replies = [{"label": "📋 기록 열람 페이지 오픈", "action": "webLink", "webLinkUrl": history_url}]
-            return make_kakao_response("✅ 과거 기록 확인 및 워드 다운로드 페이지입니다.", replies)
 
         elif intent_name == "조편성":
             utterance = body.get("userRequest", {}).get("utterance", "")
@@ -283,9 +306,8 @@ def kakao_bot_main(body: dict):
                 for m_att in team: supabase.table("attendances").update({"team_name": t_name}).eq("id", m_att[
                     "att_id"]).execute()
 
-            edit_url = f"{get_server_host()}/admin/edit_teams?seminar_id={target_id}&day={day_choice}&admin_key={SUPABASE_KEY[:10]}"
-            replies = [{"label": "🛠️ 조원 핀셋 수정하기", "action": "webLink", "webLinkUrl": edit_url}]
-            return make_kakao_response(report, replies)
+            url = f"{get_server_host()}/admin/edit_teams?seminar_id={target_id}&day={day_choice}&admin_key={SUPABASE_KEY[:10]}"
+            return make_kakao_link_response(report, "🛠️ 조원 핀셋 수정하기", url)
 
         # ==========================================
         # 🔵 일반 부원 전용 기능들
@@ -313,6 +335,8 @@ def kakao_bot_main(body: dict):
             if existing_vote.data: return make_kakao_response("이미 투표하셨습니다!\n('내 상태' 버튼을 눌러 확인해 보세요.)")
 
             target_seminar = next((s for s in seminars_res.data if s["day"] == day_choice), None)
+            if not target_seminar: return make_kakao_response(f"활성화된 {day_choice} 세미나가 없습니다.")
+
             attendees = supabase.table("attendances").select("id", count="exact").eq("seminar_id",
                                                                                      target_seminar["id"]).eq("status",
                                                                                                               "attending").execute()
@@ -371,9 +395,11 @@ def kakao_bot_main(body: dict):
                 "kakao_id", user_id).eq("status", "attending").execute()
             if not my_vote.data: return make_kakao_response("이번 주 '참석 확정' 부원만 제출 가능합니다.")
 
-            submit_url = f"{get_server_host()}/submit_topic?att_id={my_vote.data[0]['id']}"
-            replies = [{"label": "📝 발제 폼으로 이동하기", "action": "webLink", "webLinkUrl": submit_url}]
-            return make_kakao_response("✅ 아래 버튼을 눌러 발제 내용을 작성해 주세요.", replies)
+            target_seminar = next(s for s in seminars_res.data if s["id"] == my_vote.data[0]["seminar_id"])
+            url = f"{get_server_host()}/submit_topic?att_id={my_vote.data[0]['id']}"
+            return make_kakao_link_response(
+                f"✅ {user_info['name']}님, 발제문 제출 링크를 준비했습니다!\n\n'{target_seminar['week_name']} {target_seminar['day']}' 세미나의 발제 내용을 정성껏 작성해 주세요.",
+                "📝 발제 폼으로 이동하기", url)
 
         else:
             return make_kakao_response("준비되지 않은 기능입니다.")
@@ -460,7 +486,7 @@ def admin_history_page(request: Request, admin_key: str):
                                       {"request": request, "history_data": history_data, "admin_key": admin_key})
 
 
-# 📄 워드 파일 다운로드 (과거 & 현재 모두 지원)
+# 📄 워드 파일 다운로드
 @app.get("/admin/history/{seminar_id}/download_word")
 def download_topics_word(seminar_id: int, admin_key: str):
     if admin_key != SUPABASE_KEY[:10]: return HTMLResponse("⛔ 권한 없음")
@@ -502,26 +528,22 @@ def download_topics_word(seminar_id: int, admin_key: str):
 
 
 # ==========================================
-# 🛠️ [신규] 수동 출석 관리 (추가/삭제)
+# 🛠️ 수동 출석 관리 (추가/삭제)
 # ==========================================
 @app.get("/admin/manual_manage", response_class=HTMLResponse)
 def admin_manual_manage(request: Request, admin_key: str, day: str = "월요일"):
     if admin_key != SUPABASE_KEY[:10]: return HTMLResponse("⛔ 권한 없음")
 
-    # 1. 활성화된 세미나 가져오기
     seminars_res = supabase.table("seminars").select("*").eq("is_active", True).execute()
     if not seminars_res.data: return HTMLResponse("활성화된 세미나가 없습니다.")
 
     target_seminar = next((s for s in seminars_res.data if s["day"] == day), None)
 
-    # 2. 모든 유저 정보 및 현재 참석자 가져오기
     all_users = supabase.table("users").select("kakao_id, name").execute().data
     att_res = supabase.table("attendances").select("*").eq("seminar_id", target_seminar["id"]).eq("status",
                                                                                                   "attending").execute()
 
     att_kakao_ids = {a["kakao_id"]: a["id"] for a in att_res.data}
-
-    # 참석자 명단 / 미참석자(추가 가능자) 명단 분리
     attendees = [{"att_id": att_kakao_ids[u["kakao_id"]], "name": u["name"]} for u in all_users if
                  u["kakao_id"] in att_kakao_ids]
     non_attendees = [{"kakao_id": u["kakao_id"], "name": u["name"]} for u in all_users if
@@ -553,7 +575,7 @@ def api_manual_delete(body: dict):
 
 
 # ==========================================
-# 📚 [신규] 현재 진행 중인 세미나 발제문 모아보기
+# 📚 현재 발제문 모아보기
 # ==========================================
 @app.get("/admin/current_topics", response_class=HTMLResponse)
 def admin_current_topics(request: Request, admin_key: str, day: str = "월요일"):
@@ -563,7 +585,6 @@ def admin_current_topics(request: Request, admin_key: str, day: str = "월요일
     if not seminars_res.data: return HTMLResponse("활성화된 세미나가 없습니다.")
     target_seminar = next((s for s in seminars_res.data if s["day"] == day), None)
 
-    # 발제자 데이터 가져오기
     att_res = supabase.table('attendances').select('*').eq('seminar_id', target_seminar["id"]).eq('is_facilitator',
                                                                                                   True).execute()
     users_res = supabase.table('users').select('kakao_id, name, department').in_('kakao_id', [a['kakao_id'] for a in
