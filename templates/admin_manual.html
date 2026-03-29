@@ -1,0 +1,72 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>수동 참석 관리</title>
+    <style>
+        :root { --primary: #4a69bd; --secondary: #b8e994; --bg: #f0f2f5; --card-bg: #ffffff; --text: #2f3542; }
+        body { font-family: 'Pretendard', sans-serif; padding: 20px; background-color: var(--bg); color: var(--text); }
+        .container { max-width: 600px; margin: 0 auto; background: var(--card-bg); padding: 20px; border-radius: 12px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }
+        h2 { text-align: center; color: var(--primary); }
+        .tab-btn { padding: 10px 20px; border: none; border-radius: 8px; font-weight: bold; cursor: pointer; text-decoration: none; color: white; background: #ccc; }
+        .tab-btn.active { background: var(--primary); }
+        .member-row { display: flex; justify-content: space-between; align-items: center; padding: 12px; border-bottom: 1px solid #eee; }
+        .btn-add { background: var(--secondary); border: none; padding: 8px 15px; border-radius: 6px; cursor: pointer; font-weight: bold; }
+        .btn-del { background: #ff7675; color: white; border: none; padding: 8px 15px; border-radius: 6px; cursor: pointer; font-weight: bold; }
+        select { padding: 8px; border-radius: 6px; border: 1px solid #ccc; font-size: 16px; width: 60%; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h2>🛠️ 이번 주 수동 출석 관리</h2>
+
+        <div style="text-align: center; margin-bottom: 20px;">
+            <a href="?admin_key={{ admin_key }}&day=월요일" class="tab-btn {% if day == '월요일' %}active{% endif %}">월요일</a>
+            <a href="?admin_key={{ admin_key }}&day=목요일" class="tab-btn {% if day == '목요일' %}active{% endif %}">목요일</a>
+        </div>
+
+        <div style="background: #f8f9fa; padding: 15px; border-radius: 8px; margin-bottom: 20px;">
+            <h3 style="margin-top:0;">➕ 참석자 추가하기</h3>
+            <div style="display: flex; justify-content: space-between;">
+                <select id="userSelect">
+                    <option value="">-- 부원 선택 --</option>
+                    {% for u in non_attendees %}
+                        <option value="{{ u.kakao_id }}">{{ u.name }}</option>
+                    {% endfor %}
+                </select>
+                <button class="btn-add" onclick="addMember()">추가</button>
+            </div>
+        </div>
+
+        <h3>✅ 현재 {{ day }} 참석 확정자 ({{ attendees|length }}명)</h3>
+        <div>
+            {% for att in attendees %}
+            <div class="member-row">
+                <span>👤 {{ att.name }}</span>
+                <button class="btn-del" onclick="delMember({{ att.att_id }})">삭제(취소)</button>
+            </div>
+            {% endfor %}
+        </div>
+    </div>
+
+    <script>
+        async function addMember() {
+            const kakao_id = document.getElementById("userSelect").value;
+            if(!kakao_id) return alert("부원을 선택해주세요!");
+            await fetch('/api/admin/manual_add', {
+                method: 'POST', headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({ seminar_id: {{ seminar_id }}, kakao_id: kakao_id })
+            });
+            location.reload();
+        }
+        async function delMember(att_id) {
+            if(!confirm("정말 이 참석자를 삭제하시겠습니까?")) return;
+            await fetch('/api/admin/manual_delete', {
+                method: 'POST', headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({ att_id: att_id })
+            });
+            location.reload();
+        }
+    </script>
+</body>
+</html>
