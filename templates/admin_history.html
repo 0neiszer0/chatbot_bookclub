@@ -1,0 +1,81 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>과거 세미나 기록</title>
+    <style>
+        :root { --primary: #4a69bd; --secondary: #b8e994; --bg: #f0f2f5; --card-bg: #ffffff; --text: #2f3542; --border: #dcdde1; }
+        body { font-family: 'Pretendard', sans-serif; padding: 20px; background-color: var(--bg); color: var(--text); }
+        .container { max-width: 800px; margin: 0 auto; }
+        h2 { text-align: center; color: var(--primary); }
+        .history-card { border: 1px solid var(--border); border-radius: 12px; padding: 20px; margin-bottom: 20px; background: var(--card-bg); box-shadow: 0 4px 6px rgba(0,0,0,0.05); }
+        .history-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px; border-bottom: 2px solid #eee; padding-bottom: 10px; }
+        .week-badge { background: var(--secondary); color: var(--text); padding: 5px 12px; border-radius: 20px; font-weight: bold; font-size: 0.9em; }
+        .group-box { background: #f8f9fa; border-radius: 8px; padding: 15px; margin-bottom: 10px; border-left: 4px solid var(--primary); }
+        .topic-details { font-size: 0.9em; background: #fff; border: 1px solid #eee; padding: 12px; border-radius: 6px; margin-top: 8px; display: none; }
+        .fac-name { color: var(--primary); font-weight: bold; cursor: pointer; text-decoration: underline; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h2>📋 과거 세미나 조 편성 및 발제 기록</h2>
+        <p style="text-align:center; color:#666; margin-bottom:30px;">최근 10개의 세미나 기록을 보여줍니다.</p>
+
+        {% if not history_data %}
+            <p style='text-align:center;'>아직 종료된 세미나 기록이 없습니다.</p>
+        {% else %}
+            {% for h in history_data %}
+            <div class="history-card">
+                <div class="history-header">
+                    <span class="week-badge">{{ h.week }}</span>
+                    <span style="font-weight:bold; color:var(--text);">{{ h.day }} ({{ h.date }})</span>
+                </div>
+
+                {% for t_name, members in h.teams.items() %}
+                <div class="group-box">
+                    <div style="font-weight:bold; margin-bottom:5px; color:#333;">📍 {{ t_name }}</div>
+
+                    {% set fac = members | selectattr("is_fac") | first %}
+                    <div>👑발제:
+                        {% if fac %}
+                            <span class='fac-name' onclick='toggleTopic(this)'>{{ fac.name }}</span>
+                            {% if fac.topic %}
+                            <div class="topic-details">
+                                <b>📚 책:</b> {{ fac.topic.book_title }} ({{ fac.topic.author }})<br>
+                                <b>🔖 범위:</b> {{ fac.topic.range }}<br>
+                                <b>🧐 질문:</b>
+                                <ul style="margin-top:5px; padding-left:20px;">
+                                    {% for q in fac.topic.questions %}
+                                        {% if q %}<li>{{ q }}</li>{% endif %}
+                                    {% endfor %}
+                                </ul>
+                            </div>
+                            {% endif %}
+                        {% else %}
+                            없음
+                        {% endif %}
+                    </div>
+
+                    <div style="color:#666; font-size:0.95em; margin-top:5px;">
+                        👥부원:
+                        {% for m in members if not m.is_fac %}
+                            {{ m.name }}{% if not loop.last %}, {% endif %}
+                        {% endfor %}
+                    </div>
+                </div>
+                {% endfor %}
+            </div>
+            {% endfor %}
+        {% endif %}
+    </div>
+
+    <script>
+        function toggleTopic(el) {
+            const details = el.nextElementSibling;
+            if(details && details.classList.contains('topic-details')) {
+                details.style.display = details.style.display === 'block' ? 'none' : 'block';
+            }
+        }
+    </script>
+</body>
+</html>

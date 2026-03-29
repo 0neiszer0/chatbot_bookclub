@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{{ day }} 조원 수정</title>
+    <style>
+        :root { --primary: #4a69bd; --secondary: #b8e994; --bg: #f0f2f5; --card-bg: #ffffff; --text: #2f3542; --border: #dcdde1; }
+        body { font-family: 'Pretendard', sans-serif; padding: 20px; background-color: var(--bg); color: var(--text); }
+        .container { max-width: 600px; margin: 0 auto; background: var(--card-bg); padding: 20px; border-radius: 12px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }
+        h2 { text-align: center; color: var(--primary); }
+        .member-row { display: flex; justify-content: space-between; align-items: center; padding: 12px; border-bottom: 1px solid #eee; }
+        select { padding: 8px; border-radius: 6px; border: 1px solid #ccc; font-size: 16px; outline: none; }
+        select:focus { border-color: var(--primary); }
+        .btn { display: block; width: 100%; padding: 15px; margin-top: 20px; background: var(--primary); color: white; border: none; border-radius: 8px; font-size: 18px; font-weight: bold; cursor: pointer; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h2>🛠️ {{ day }} 조원 핀셋 수정</h2>
+        <p style="text-align:center; color:#666; margin-bottom:20px;">드롭다운을 눌러 조를 변경한 후 저장하세요.</p>
+        <div id="membersList">
+            {% for att in attendees %}
+            <div class="member-row">
+                <span>👤 {{ att.name }}</span>
+                <select class="team-select" data-att-id="{{ att.att_id }}">
+                    <option value="{{ att.team_name }}" selected hidden>{{ att.team_name }}</option>
+                    {% for i in range(1, 11) %}
+                        <option value="{{ i }}조">{{ i }}조</option>
+                    {% endfor %}
+                </select>
+            </div>
+            {% endfor %}
+        </div>
+        <button class="btn" onclick="saveTeams()">💾 변경사항 저장하기</button>
+        <p id="msg" style="text-align:center; margin-top:15px; font-weight:bold;"></p>
+    </div>
+    <script>
+        async function saveTeams() {
+            const selects = document.querySelectorAll(".team-select");
+            const updates = Array.from(selects).map(s => ({ att_id: s.dataset.attId, team_name: s.value }));
+
+            const response = await fetch('/api/admin/save_teams', {
+                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ updates })
+            });
+
+            if (response.ok) { document.getElementById("msg").innerText = "✅ 저장 성공! 카톡으로 돌아가세요."; document.getElementById("msg").style.color="var(--secondary)"; }
+            else { document.getElementById("msg").innerText = "❌ 저장 실패."; document.getElementById("msg").style.color="red"; }
+        }
+    </script>
+</body>
+</html>

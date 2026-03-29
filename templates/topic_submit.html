@@ -1,0 +1,82 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>발제문 제출</title>
+    <style>
+        :root { --primary: #4a69bd; --secondary: #b8e994; --bg: #f0f2f5; --card-bg: #ffffff; --text: #2f3542; --border: #dcdde1; }
+        * { box-sizing: border-box; }
+        body { font-family: 'Pretendard', system-ui, sans-serif; padding: 20px; background-color: var(--bg); color: var(--text); line-height: 1.6; margin: 0; }
+        .container { max-width: 800px; margin: 0 auto; background: var(--card-bg); padding: 30px; border-radius: 16px; box-shadow: 0 10px 25px rgba(0,0,0,0.05); }
+        h2 { text-align: center; color: var(--primary); margin-top: 0; }
+        .section { margin-bottom: 25px; padding-bottom: 20px; border-bottom: 1px solid var(--border); }
+        .section-title { font-weight: bold; font-size: 1.1em; color: var(--primary); margin-bottom: 10px; }
+        label { display: block; margin-bottom: 8px; font-weight: 500; }
+        input[type=text], textarea { width: 100%; padding: 12px; margin-bottom: 15px; border: 1px solid var(--border); border-radius: 8px; font-size: 16px; transition: border-color 0.2s; }
+        input:focus, textarea:focus { border-color: var(--primary); outline: none; }
+        textarea { height: 120px; resize: vertical; }
+        .btn { display: block; width: 100%; padding: 15px; border: none; border-radius: 8px; font-size: 18px; font-weight: 600; cursor: pointer; text-align: center; background-color: var(--primary); color: white; transition: background 0.2s; }
+        .btn:hover { background-color: #3c55a5; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h2>📝 이번 주 세미나 발제문 제출</h2>
+        <p style="text-align:center; color:#666; margin-bottom:30px;">항목별로 내용을 정성껏 작성해 주세요.</p>
+
+        <form id="topicForm">
+            <input type="hidden" name="att_id" value="{{ att_id }}">
+
+            <div class="section">
+                <div class="section-title">📚 책 정보</div>
+                <label>책 제목</label>
+                <input type="text" name="book_title" placeholder="예: 공정하다는 착각" required>
+                <label>저자</label>
+                <input type="text" name="author" placeholder="예: 마이클 샌델" required>
+                <label>발제 범위 (페이지/챕터)</label>
+                <input type="text" name="range" placeholder="예: p.120 ~ 180 또는 3장 전체" required>
+            </div>
+
+            <div class="section">
+                <div class="section-title">🧐 발제 내용 (질문)</div>
+                <label>논의하고 싶은 질문 1</label>
+                <textarea name="q1" placeholder="책 내용과 관련된 첫 번째 질문을 적어주세요." required></textarea>
+                <label>논의하고 싶은 질문 2</label>
+                <textarea name="q2" placeholder="두 번째 질문을 적어주세요." required></textarea>
+                <label>(선택) 논의하고 싶은 질문 3</label>
+                <textarea name="q3" placeholder="추가 질문이 있다면 적어주세요."></textarea>
+            </div>
+
+            <button type="button" class="btn" onclick="submitForm()">💾 발제문 제출하기</button>
+        </form>
+        <p id="statusMsg" style="text-align:center; margin-top:20px; font-weight:bold;"></p>
+    </div>
+
+    <script>
+        async function submitForm() {
+            const form = document.getElementById('topicForm');
+            const formData = new FormData(form);
+            const data = {};
+            formData.forEach((value, key) => data[key] = value);
+
+            document.getElementById('statusMsg').innerText = "제출 중...";
+
+            const response = await fetch('/api/submit_topic', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(data)
+            });
+
+            const result = await response.json();
+            if (result.status === 'success') {
+                document.getElementById('statusMsg').innerText = "✅ 제출 성공! 창을 닫고 카톡으로 돌아가세요.";
+                document.getElementById('statusMsg').style.color = "var(--secondary)";
+                document.querySelector('.btn').style.display = 'none';
+            } else {
+                document.getElementById('statusMsg').innerText = "❌ 제출 실패: " + result.message;
+                document.getElementById('statusMsg').style.color = "red";
+            }
+        }
+    </script>
+</body>
+</html>

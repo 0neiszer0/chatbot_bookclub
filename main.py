@@ -1,52 +1,60 @@
 import os
 import datetime
 import random
+import json
 from collections import defaultdict
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse
+from fastapi.templating import Jinja2Templates
 from supabase import create_client, Client
 from dotenv import load_dotenv
 
 load_dotenv()
 app = FastAPI()
 
+# 템플릿 엔진 설정 (templates 폴더 연결)
+templates = Jinja2Templates(directory="templates")
+
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 
-def make_response(text: str):
-    return {"version": "2.0", "template": {"outputs": [{"simpleText": {"text": text}}]}}
+def make_kakao_response(text: str, quick_replies: list = None):
+    response = {"version": "2.0", "template": {"outputs": [{"simpleText": {"text": text}}]}}
+    if quick_replies: response["template"]["quickReplies"] = quick_replies
+    return response
 
 
-def get_kst_now():
-    return datetime.datetime.utcnow() + datetime.timedelta(hours=9)
+def get_kst_now(): return datetime.datetime.utcnow() + datetime.timedelta(hours=9)
 
 
-# ==========================================
-# 🤖 카카오톡 챗봇 엔드포인트
-# ==========================================
+def get_server_host(): return os.environ.get("RENDER_EXTERNAL_URL", "http://localhost:8000")
+
+
 @app.post("/kakao")
-def kakao_response(body: dict):
+def kakao_bot_main(body: dict):
     user_id = body.get("userRequest", {}).get("user", {}).get("id", "알수없음")
     intent_name = body.get("intent", {}).get("name", "")
     params = body.get("action", {}).get("params", {})
 
     try:
-        # [1. 회원가입, 2. 세미나생성, 3. 참석투표, 4. 투표취소, 5. 내상태, 6. 명단확인 코드는 이전과 동일하게 유지]
-        if intent_name == "회원가입":
+        if intent_name == "연결 테스트":
+            return make_kakao_response("연결 성공! 🚀")
+
+        elif intent_name == "회원가입":
             name, student_id, dept, gender = params.get("name"), params.get("student_id"), params.get(
                 "department"), params.get("gender")
             supabase.table("users").upsert(
                 {"kakao_id": user_id, "name": name, "student_id": student_id, "department": dept, "gender": gender,
                  "role": "member"}).execute()
-            return make_response(f"환영합니다, {name}님! 🎉\n성공적으로 동아리원에 등록되었습니다.")
+            return make_kakao_response(f"환영합니다, {name}님! 🎉\n회원 등록 완료.")
 
         elif intent_name == "세미나생성":
             user_db = supabase.table("users").select("role").eq("kakao_id", user_id).execute()
-            if not user_db.data or user_db.data[0].get("role") != "admin": return make_response("⛔ 관리자 권한이 없습니다.")
+            if not user_db.data or user_db.data[0].get("role") != "admin": return make_kakao_response("⛔ 관리자 권한이 없습니다.")
             week_name = params.get("week_name", "새로운 주차")
-            now_kst = get_kst_now()
+            now_kst = get_kst_now();
             days_to_friday = (4 - now_kst.weekday()) % 7
             if days_to_friday == 0 and now_kst.hour >= 18: days_to_friday = 7
             open_time = (now_kst + datetime.timedelta(days=days_to_friday)).replace(hour=18, minute=0, second=0)
@@ -58,39 +66,38 @@ def kakao_response(body: dict):
                 {"week_name": week_name, "day": "목요일", "capacity": 30, "open_time": open_time.isoformat(),
                  "close_time": close_time.isoformat(), "is_active": True}
             ]).execute()
-            return make_response(
+            return make_kakao_response(
                 f"✅ [{week_name}] 예약 세팅 완료!\n⏰ 오픈: {open_time.strftime('%m/%d(금) 18:00')}\n⏰ 마감: {close_time.strftime('%m/%d(일) 23:59')}")
 
         elif intent_name == "참석투표":
             day_choice = params.get("day_choice")
-            if not day_choice: return make_response("요일을 선택해 주세요.")
             seminars_res = supabase.table("seminars").select("*").eq("is_active", True).execute()
-            if not seminars_res.data: return make_response("진행 중인 세미나가 없습니다. 😅")
+            if not seminars_res.data: return make_kakao_response("진행 중인 세미나가 없습니다.")
             now_str = get_kst_now().isoformat()
-            if now_str < seminars_res.data[0]["open_time"]: return make_response("아직 투표 기간이 아닙니다! (금요일 18시 오픈)")
-            if now_str > seminars_res.data[0]["close_time"]: return make_response("투표가 마감되었습니다. 🥲")
+            if now_str < seminars_res.data[0]["open_time"]: return make_kakao_response("아직 투표 기간이 아닙니다!")
+            if now_str > seminars_res.data[0]["close_time"]: return make_kakao_response("투표가 마감되었습니다.")
             active_ids = [s["id"] for s in seminars_res.data]
             existing_vote = supabase.table("attendances").select("*").in_("seminar_id", active_ids).eq("kakao_id",
                                                                                                        user_id).execute()
-            if existing_vote.data: return make_response("이미 투표하셨습니다! (상태 확인: '내 상태')")
+            if existing_vote.data: return make_kakao_response("이미 투표하셨습니다!\n('내 상태' 입력)")
             target_seminar = next((s for s in seminars_res.data if s["day"] == day_choice), None)
             attendees = supabase.table("attendances").select("id", count="exact").eq("seminar_id",
                                                                                      target_seminar["id"]).eq("status",
                                                                                                               "attending").execute()
             current_count = attendees.count if attendees.count else 0
             status = "attending" if current_count < target_seminar["capacity"] else "waitlisted"
-            msg_status = "참석 확정 🎉" if status == "attending" else "대기자 등록 🥲 (취소자 발생 시 자동 승급)"
             supabase.table("attendances").insert(
                 {"seminar_id": target_seminar["id"], "kakao_id": user_id, "status": status}).execute()
-            return make_response(f"[{target_seminar['week_name']} - {day_choice}]\n{msg_status}")
+            msg = "참석 확정 🎉" if status == "attending" else "대기자 등록 🥲"
+            return make_kakao_response(f"[{day_choice}]\n{msg}")
 
         elif intent_name == "투표취소":
             seminars_res = supabase.table("seminars").select("id").eq("is_active", True).execute()
-            if not seminars_res.data: return make_response("진행 중인 세미나가 없습니다.")
+            if not seminars_res.data: return make_kakao_response("진행 중인 세미나가 없습니다.")
             my_vote = supabase.table("attendances").select("*").in_("seminar_id",
                                                                     [s["id"] for s in seminars_res.data]).eq("kakao_id",
                                                                                                              user_id).execute()
-            if not my_vote.data: return make_response("취소할 투표 내역이 없습니다.")
+            if not my_vote.data: return make_kakao_response("취소할 투표 내역이 없습니다.")
             vote_data = my_vote.data[0]
             supabase.table("attendances").delete().eq("id", vote_data["id"]).execute()
             if vote_data["status"] == "attending":
@@ -100,27 +107,27 @@ def kakao_response(body: dict):
                                                                                                        next_in_line.data[
                                                                                                            0][
                                                                                                            "id"]).execute()
-            return make_response("✅ 취소 완료. (대기자가 있었다면 자동 승급되었습니다.)")
+            return make_kakao_response("✅ 취소 완료. (대기자가 있었다면 자동 승급되었습니다.)")
 
         elif intent_name == "내상태":
             seminars_res = supabase.table("seminars").select("*").eq("is_active", True).execute()
-            if not seminars_res.data: return make_response("진행 중인 세미나가 없습니다.")
+            if not seminars_res.data: return make_kakao_response("진행 중인 세미나가 없습니다.")
             my_vote = supabase.table("attendances").select("*").in_("seminar_id",
                                                                     [s["id"] for s in seminars_res.data]).eq("kakao_id",
                                                                                                              user_id).execute()
-            if not my_vote.data: return make_response("이번 주 세미나에 투표하지 않으셨습니다.")
+            if not my_vote.data: return make_kakao_response("이번 주 세미나에 투표하지 않으셨습니다.")
             target_seminar = next(s for s in seminars_res.data if s["id"] == my_vote.data[0]["seminar_id"])
             status_kr = "✅ 참석 확정" if my_vote.data[0]["status"] == "attending" else "⏳ 대기 중"
             team_info = f"\n📌 소속 조: {my_vote.data[0].get('team_name', '아직 편성 안 됨')}" if my_vote.data[0][
                                                                                             "status"] == "attending" else ""
-            return make_response(
+            return make_kakao_response(
                 f"[{target_seminar['week_name']}]\n📌 요일: {target_seminar['day']}\n📌 상태: {status_kr}{team_info}\n\n사정이 생기면 '투표취소'를 입력해주세요.")
 
         elif intent_name == "명단확인":
             user_db = supabase.table("users").select("role").eq("kakao_id", user_id).execute()
-            if not user_db.data or user_db.data[0].get("role") != "admin": return make_response("⛔ 관리자 전용입니다.")
+            if not user_db.data or user_db.data[0].get("role") != "admin": return make_kakao_response("⛔ 관리자 전용입니다.")
             seminars_res = supabase.table("seminars").select("*").eq("is_active", True).execute()
-            if not seminars_res.data: return make_response("진행 중인 세미나가 없습니다.")
+            if not seminars_res.data: return make_kakao_response("진행 중인 세미나가 없습니다.")
             att_res = supabase.table("attendances").select("*").in_("seminar_id",
                                                                     [s["id"] for s in seminars_res.data]).eq("status",
                                                                                                              "attending").execute()
@@ -136,65 +143,55 @@ def kakao_response(body: dict):
                     mon_list.append(f"{name}{team}")
                 else:
                     thu_list.append(f"{name}{team}")
-            return make_response(
+            return make_kakao_response(
                 f"📋 [참석 확정 명단]\n\n[월요일]\n{', '.join(mon_list) if mon_list else '없음'}\n\n[목요일]\n{', '.join(thu_list) if thu_list else '없음'}")
 
-        # ==========================================
-        # 📝 [신규] 발제문 제출
-        # ==========================================
+        # ----------------------------------------------------
+        # 웹페이지 연결 인텐트들
+        # ----------------------------------------------------
+        elif intent_name == "기록열람":
+            user_db = supabase.table("users").select("role").eq("kakao_id", user_id).execute()
+            if not user_db.data or user_db.data[0].get("role") != "admin": return make_kakao_response("⛔ 관리자 전용입니다.")
+            history_url = f"{get_server_host()}/admin/history?admin_key={SUPABASE_KEY[:10]}"
+            replies = [{"label": "📋 기록 열람 페이지 오픈", "action": "webLink", "webLinkUrl": history_url}]
+            return make_kakao_response("아래 버튼을 눌러 과거 기록을 확인하세요!", replies)
+
         elif intent_name == "발제문제출":
-            topic_content = params.get("topic_content")
-            if not topic_content: return make_response("제출할 내용을 적어주세요.")
-
             seminars_res = supabase.table("seminars").select("id").eq("is_active", True).execute()
-            if not seminars_res.data: return make_response("현재 활성화된 세미나가 없습니다.")
-
-            # 내 투표 내역 찾기
-            my_vote = supabase.table("attendances").select("id").in_("seminar_id",
-                                                                     [s["id"] for s in seminars_res.data]).eq(
+            if not seminars_res.data: return make_kakao_response("활성화된 세미나가 없습니다.")
+            active_ids = [s["id"] for s in seminars_res.data]
+            my_vote = supabase.table("attendances").select("id, seminar_id").in_("seminar_id", active_ids).eq(
                 "kakao_id", user_id).eq("status", "attending").execute()
-            if not my_vote.data: return make_response("이번 주 '참석 확정' 상태인 부원만 발제문을 제출할 수 있습니다.")
+            if not my_vote.data: return make_kakao_response("이번 주 '참석 확정' 부원만 발제 제출이 가능합니다.")
 
-            # 발제자로 마킹 및 내용 저장
-            supabase.table("attendances").update({"is_facilitator": True, "topic_content": topic_content}).eq("id",
-                                                                                                              my_vote.data[
-                                                                                                                  0][
-                                                                                                                  "id"]).execute()
-            return make_response("✅ 발제문이 성공적으로 제출되었습니다!\n(자동으로 이번 주 조장으로 우선 배정됩니다.)")
+            submit_url = f"{get_server_host()}/submit_topic?att_id={my_vote.data[0]['id']}"
+            replies = [{"label": "📝 발제문 작성하기", "action": "webLink", "webLinkUrl": submit_url}]
+            return make_kakao_response("아래 버튼을 눌러 웹페이지에서 책 정보와 발제 내용을 작성해 주세요!", replies)
 
-        # ==========================================
-        # 🧠 [신규] 랜덤 시뮬레이션 조 편성 + 리포트
-        # ==========================================
         elif intent_name == "조편성":
             user_db = supabase.table("users").select("role").eq("kakao_id", user_id).execute()
-            if not user_db.data or user_db.data[0].get("role") != "admin": return make_response("⛔ 관리자 전용입니다.")
-
+            if not user_db.data or user_db.data[0].get("role") != "admin": return make_kakao_response("⛔ 관리자 전용입니다.")
             day_choice = params.get("day_choice")
-            if not day_choice: return make_response("어느 요일 조를 편성할까요? (월요일/목요일)")
-
             seminar_res = supabase.table("seminars").select("*").eq("is_active", True).eq("day", day_choice).execute()
-            if not seminar_res.data: return make_response(f"활성화된 {day_choice} 세미나가 없습니다.")
-            target_seminar = seminar_res.data[0]
+            if not seminar_res.data: return make_kakao_response(f"활성화된 {day_choice} 세미나가 없습니다.")
+            target_id = seminar_res.data[0]["id"]
 
-            att_res = supabase.table("attendances").select("*").eq("seminar_id", target_seminar["id"]).eq("status",
-                                                                                                          "attending").execute()
-            if not att_res.data: return make_response("참석 확정자가 없습니다.")
+            att_res = supabase.table("attendances").select("*").eq("seminar_id", target_id).eq("status",
+                                                                                               "attending").execute()
+            if len(att_res.data) < 2: return make_kakao_response("참석자가 너무 적어 조 편성이 불가능합니다.")
 
             users_res = supabase.table("users").select("kakao_id, name, gender").in_("kakao_id", [a["kakao_id"] for a in
                                                                                                   att_res.data]).execute()
             user_dict = {u["kakao_id"]: u for u in users_res.data}
-
             attendees = [{"att_id": a["id"], "kakao_id": a["kakao_id"], "name": user_dict[a["kakao_id"]]["name"],
                           "gender": user_dict[a["kakao_id"]]["gender"], "is_fac": a.get("is_facilitator", False)} for a
                          in att_res.data if a["kakao_id"] in user_dict]
 
-            # 과거 만남 기록 가져오기
             past_res = supabase.table("attendances").select("seminar_id, team_name, kakao_id").neq("team_name",
                                                                                                    "None").execute()
             past_groups = defaultdict(list)
             for p in past_res.data:
                 if p["team_name"]: past_groups[f"{p['seminar_id']}_{p['team_name']}"].append(p["kakao_id"])
-
             past_encounters = defaultdict(int)
             for members in past_groups.values():
                 for i in range(len(members)):
@@ -202,195 +199,152 @@ def kakao_response(body: dict):
                         pair = tuple(sorted([members[i], members[j]]))
                         past_encounters[pair] += 1
 
-            # 1만 회 랜덤 시뮬레이션
-            num_people = len(attendees)
-            num_teams = max(1, num_people // 4)
-            team_sizes = [4] * num_teams
-            for i in range(num_people % 4): team_sizes[i] += 1
-
-            best_score = float('inf')
-            best_teams = []
-
-            facs = [a for a in attendees if a["is_fac"]]
+            best_teams, best_score = [], float('inf')
+            facs = [a for a in attendees if a["is_fac"]];
             norms = [a for a in attendees if not a["is_fac"]]
+            num_teams = max(1, len(attendees) // 4);
+            team_sizes = [4] * num_teams
+            for i in range(len(attendees) % 4): team_sizes[i] += 1
 
             for _ in range(10000):
-                random.shuffle(facs)
-                random.shuffle(norms)
-
+                random.shuffle(facs);
+                random.shuffle(norms);
                 teams = [[] for _ in range(num_teams)]
-                f_idx, n_idx = 0, 0
-
-                for f in facs:
-                    teams[f_idx % num_teams].append(f)
-                    f_idx += 1
-
+                f_idx = 0
+                for f in facs: teams[f_idx % num_teams].append(f); f_idx += 1
+                n_idx = 0
                 for i, size in enumerate(team_sizes):
-                    while len(teams[i]) < size and n_idx < len(norms):
-                        teams[i].append(norms[n_idx])
-                        n_idx += 1
+                    while len(teams[i]) < size and n_idx < len(norms): teams[i].append(norms[n_idx]); n_idx += 1
 
                 score = 0
                 for t in teams:
-                    males = sum(1 for x in t if x['gender'] == '남')
-                    females = sum(1 for x in t if x['gender'] == '여')
-                    score += abs(males - females) * 100  # 성비 불균형 페널티 (최우선)
-
+                    m = sum(1 for x in t if x['gender'] == '남');
+                    f = len(t) - m
+                    score += abs(m - f) * 100
                     for i in range(len(t)):
                         for j in range(i + 1, len(t)):
                             pair = tuple(sorted([t[i]['kakao_id'], t[j]['kakao_id']]))
-                            if pair in past_encounters:
-                                score += past_encounters[pair] * 10  # 과거 만남 페널티
+                            if pair in past_encounters: score += past_encounters[pair] * 10
+                if score < best_score: best_score, best_teams = score, teams
+                if score == 0: break
 
-                if score < best_score:
-                    best_score, best_teams = score, teams
-                    if score == 0: break
-
-            # DB에 최적 결과 저장 & 리포트 작성
-            report = f"✨ [{target_seminar['week_name']} - {day_choice}] 조 편성 초안\n\n"
+            report = f"✨ [{day_choice}] 조 편성 초안\n\n"
             for i, team in enumerate(best_teams):
-                team_name = f"{i + 1}조"
-                fac_names = [m['name'] for m in team if m['is_fac']]
-                norm_names = [m['name'] for m in team if not m['is_fac']]
-                m_cnt = sum(1 for m in team if m['gender'] == '남')
-                f_cnt = len(team) - m_cnt
+                t_name = f"{i + 1}조";
+                m = sum(1 for x in t if x['gender'] == '남');
+                f = len(t) - m
+                facs_str = ", ".join([x['name'] for x in team if x['is_fac']])
+                norms_str = ", ".join([x['name'] for x in team if not x['is_fac']])
+                report += f"📍 {t_name} (여{f}, 남{m})\n👑발제: {facs_str if facs_str else '없음'}\n부원: {norms_str}\n\n"
 
-                report += f"📍 {team_name} (여{f_cnt}, 남{m_cnt})\n"
-                report += f"👑발제자: {', '.join(fac_names) if fac_names else '없음'}\n"
-                report += f"부원: {', '.join(norm_names)}\n"
-
-                # 특이사항 (과거 만남) 체크
                 warnings = []
                 for idx1 in range(len(team)):
                     for idx2 in range(idx1 + 1, len(team)):
                         pair = tuple(sorted([team[idx1]['kakao_id'], team[idx2]['kakao_id']]))
-                        if pair in past_encounters:
-                            warnings.append(f"{team[idx1]['name']}&{team[idx2]['name']}({past_encounters[pair]}회)")
-
+                        if pair in past_encounters: warnings.append(
+                            f"{team[idx1]['name']}&{team[idx2]['name']}({past_encounters[pair]}회)")
                 if warnings:
                     report += f"⚠️ 특이사항: {', '.join(warnings)}\n\n"
                 else:
-                    report += f"⚠️ 특이사항: 중복 인원 없음!\n\n"
+                    report += f"⚠️ 특이사항: 깨끗함!\n\n"
 
-                for m in team:
-                    supabase.table("attendances").update({"team_name": team_name}).eq("id", m["att_id"]).execute()
+                for m_att in team: supabase.table("attendances").update({"team_name": t_name}).eq("id", m_att[
+                    "att_id"]).execute()
 
-            # 관리자용 웹 링크 (Render 서버 주소로 자동 연결)
-            server_host = os.environ.get("RENDER_EXTERNAL_URL", "http://localhost:8000")
-            edit_url = f"{server_host}/admin/edit_teams?seminar_id={target_seminar['id']}&day={day_choice}"
-
-            response = {
-                "version": "2.0",
-                "template": {
-                    "outputs": [{"simpleText": {"text": report}}],
-                    "quickReplies": [
-                        {"label": "🛠️ 조원 수정하기", "action": "webLink", "webLinkUrl": edit_url}
-                    ]
-                }
-            }
-            return response
-
-        elif intent_name == "연결 테스트":
-            return make_response("연결 성공! 🚀")
-        else:
-            return make_response("준비되지 않은 기능입니다.")
+            edit_url = f"{get_server_host()}/admin/edit_teams?seminar_id={target_id}&day={day_choice}&admin_key={SUPABASE_KEY[:10]}"
+            replies = [{"label": "🛠️ 조원 핀셋 수정하기", "action": "webLink", "webLinkUrl": edit_url}]
+            return make_kakao_response(report, replies)
 
     except Exception as e:
         print(f"Error: {e}")
-        return make_response("서버 처리 중 오류가 발생했습니다.")
+        return make_kakao_response("서버 오류 발생.")
 
 
 # ==========================================
-# 🌐 [신규] 관리자 조원 교체용 비밀 웹페이지
+# 🌐 웹페이지 라우팅 (Jinja2 Templates 연동)
 # ==========================================
+
+@app.get("/submit_topic", response_class=HTMLResponse)
+def submit_topic_page(request: Request, att_id: int):
+    # HTML 파일에 변수(att_id)를 넘겨서 렌더링
+    return templates.TemplateResponse("topic_submit.html", {"request": request, "att_id": att_id})
+
+
+@app.post("/api/submit_topic")
+def api_submit_topic(data: dict):
+    try:
+        att_id = data.pop('att_id')
+        topic_json = {
+            "book_title": data.get('book_title'), "author": data.get('author'),
+            "range": data.get('range'), "questions": [data.get('q1'), data.get('q2'), data.get('q3')]
+        }
+        supabase.table("attendances").update({"is_facilitator": True, "topic_content": topic_json}).eq("id",
+                                                                                                       att_id).execute()
+        return {"status": "success"}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+
 @app.get("/admin/edit_teams", response_class=HTMLResponse)
-def edit_teams_page(seminar_id: int, day: str):
-    # 1. 참석자 명단 가져오기
+def edit_teams_page(request: Request, seminar_id: int, day: str, admin_key: str):
+    if admin_key != SUPABASE_KEY[:10]: return HTMLResponse("⛔ 권한 없음")
+
     att_res = supabase.table("attendances").select("*").eq("seminar_id", seminar_id).eq("status", "attending").execute()
     users_res = supabase.table("users").select("kakao_id, name").in_("kakao_id",
                                                                      [a["kakao_id"] for a in att_res.data]).execute()
     user_dict = {u["kakao_id"]: u["name"] for u in users_res.data}
-
     attendees = [
         {"att_id": a["id"], "name": user_dict.get(a["kakao_id"], "알수없음"), "team_name": a.get("team_name", "1조")} for a
         in att_res.data]
     attendees.sort(key=lambda x: x["team_name"])
 
-    # 2. HTML 화면 생성 (깔끔한 모바일 UI)
-    html_content = f"""
-    <!DOCTYPE html>
-    <html lang="ko">
-    <head>
-        <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>{day} 조원 수정</title>
-        <style>
-            body {{ font-family: 'Pretendard', sans-serif; padding: 20px; background-color: #f4f5f7; }}
-            .container {{ background: white; padding: 20px; border-radius: 12px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }}
-            h2 {{ text-align: center; color: #333; }}
-            .member-row {{ display: flex; justify-content: space-between; align-items: center; padding: 10px 0; border-bottom: 1px solid #eee; }}
-            select {{ padding: 8px; border-radius: 6px; border: 1px solid #ccc; font-size: 16px; }}
-            .save-btn {{ display: block; width: 100%; padding: 15px; margin-top: 20px; background: #fee500; border: none; border-radius: 8px; font-size: 18px; font-weight: bold; cursor: pointer; }}
-        </style>
-    </head>
-    <body>
-        <div class="container">
-            <h2>🛠️ {day} 조원 핀셋 수정</h2>
-            <p style="text-align: center; color: #666; font-size: 14px;">사람 이름 옆의 조를 누르고 <strong>[저장]</strong>을 누르세요.</p>
-            <div id="members-list">
-    """
-
-    team_options = "".join([f"<option value='{i}조'>{i}조</option>" for i in range(1, 11)])
-
-    for att in attendees:
-        html_content += f"""
-        <div class="member-row">
-            <span>👤 {att['name']}</span>
-            <select id="user-{att['att_id']}" data-id="{att['att_id']}">
-                <option value="{att['team_name']}" selected hidden>{att['team_name']}</option>
-                {team_options}
-            </select>
-        </div>
-        """
-
-    html_content += """
-            </div>
-            <button class="save-btn" onclick="saveTeams()">💾 변경사항 저장</button>
-            <p id="result-msg" style="text-align: center; margin-top: 15px; color: green; font-weight: bold;"></p>
-        </div>
-        <script>
-            async function saveTeams() {
-                const selects = document.querySelectorAll("select");
-                const payload = Array.from(selects).map(s => ({ "att_id": s.getAttribute("data-id"), "team_name": s.value }));
-
-                const response = await fetch("/api/admin/save_teams", {
-                    method: "POST", headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({ "updates": payload })
-                });
-
-                if (response.ok) {
-                    document.getElementById("result-msg").innerText = "저장 성공! 카톡 창으로 돌아가셔도 됩니다.";
-                } else {
-                    document.getElementById("result-msg").innerText = "저장에 실패했습니다.";
-                    document.getElementById("result-msg").style.color = "red";
-                }
-            }
-        </script>
-    </body>
-    </html>
-    """
-    return HTMLResponse(content=html_content, status_code=200)
+    return templates.TemplateResponse("admin_edit_teams.html", {
+        "request": request, "day": day, "attendees": attendees
+    })
 
 
-# ==========================================
-# 🌐 [신규] 관리자 조원 교체 저장 API
-# ==========================================
 @app.post("/api/admin/save_teams")
-def save_teams_api(body: dict):
-    updates = body.get("updates", [])
+def api_save_teams(body: dict):
     try:
-        # DB에 바뀐 팀 이름 저장
-        for u in updates: supabase.table("attendances").update({"team_name": u["team_name"]}).eq("id",
-                                                                                                 u["att_id"]).execute()
+        for u in body.get("updates", []):
+            supabase.table("attendances").update({"team_name": u["team_name"]}).eq("id", u["att_id"]).execute()
         return {"status": "success"}
     except Exception as e:
         return {"status": "error", "message": str(e)}
+
+
+@app.get("/admin/history", response_class=HTMLResponse)
+def admin_history_page(request: Request, admin_key: str):
+    if admin_key != SUPABASE_KEY[:10]: return HTMLResponse("⛔ 권한 없음")
+
+    seminars_res = supabase.table("seminars").select("*").eq("is_active", False).order("created_at", desc=True).limit(
+        10).execute()
+    seminar_ids = [s["id"] for s in seminars_res.data]
+
+    if not seminar_ids:
+        return templates.TemplateResponse("admin_history.html", {"request": request, "history_data": []})
+
+    att_res = supabase.table("attendances").select("*").in_("seminar_id", seminar_ids).eq("status", "attending").neq(
+        "team_name", "None").execute()
+    kakao_ids = list(set([a["kakao_id"] for a in att_res.data]))
+    users_res = supabase.table("users").select("kakao_id, name").in_("kakao_id", kakao_ids).execute()
+    user_dict = {u["kakao_id"]: u["name"] for u in users_res.data}
+
+    history_data = []
+    for sem in seminars_res.data:
+        sem_id = sem["id"]
+        sem_att = [a for a in att_res.data if a["seminar_id"] == sem_id]
+        teams = defaultdict(list)
+        for att in sem_att:
+            name = user_dict.get(att["kakao_id"], "알수없음")
+            teams[att["team_name"]].append({
+                "name": name, "is_fac": att["is_facilitator"], "topic": att["topic_content"]
+            })
+
+        history_data.append({
+            "week": sem["week_name"], "day": sem["day"],
+            "date": datetime.datetime.fromisoformat(sem["created_at"]).strftime('%Y-%m-%d'),
+            "teams": dict(sorted(teams.items()))
+        })
+
+    return templates.TemplateResponse("admin_history.html", {"request": request, "history_data": history_data})
