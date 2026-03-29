@@ -3,3 +3,5 @@ uvicorn
 supabase
 python-dotenv
 jinja2
+docxtpl
+python-docx

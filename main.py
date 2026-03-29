@@ -2,10 +2,12 @@ import os
 import datetime
 import random
 import json
+from io import BytesIO
 from collections import defaultdict
 from fastapi import FastAPI, Request
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, StreamingResponse
 from fastapi.templating import Jinja2Templates
+from docxtpl import DocxTemplate
 from supabase import create_client, Client
 from dotenv import load_dotenv
 
@@ -78,7 +80,7 @@ def kakao_bot_main(body: dict):
                 return make_kakao_response("⛔ 운영진(관리자) 전용 기능입니다.")
 
         # ==========================================
-        # 📖 [신규] 일반 부원 가이드 (도움말)
+        # 📖 일반 부원 가이드 (도움말)
         # ==========================================
         if intent_name == "도움말":
             guide_msg = (
@@ -120,7 +122,7 @@ def kakao_bot_main(body: dict):
                 "▪️ 기능: 이번 주 월/목 참석 확정자 명단을 쫙 뽑아줍니다.\n"
                 "▪️ 방법: '명단확인' 입력\n\n"
                 "4️⃣ 기록열람\n"
-                "▪️ 기능: 역대 세미나의 조 편성 및 제출된 발제 기록을 한눈에 봅니다.\n"
+                "▪️ 기능: 역대 세미나의 조 편성 및 제출된 발제 기록을 한눈에 봅니다. (워드 다운로드 지원)\n"
                 "▪️ 방법: '기록열람' 입력\n\n"
                 "운영진 여러분, 이번 주도 화이팅입니다! 💪"
             )
@@ -204,17 +206,43 @@ def kakao_bot_main(body: dict):
                           "gender": user_dict[a["kakao_id"]]["gender"], "is_fac": a.get("is_facilitator", False)} for a
                          in att_res.data if a["kakao_id"] in user_dict]
 
-            past_res = supabase.table("attendances").select("seminar_id, team_name, kakao_id").neq("team_name",
-                                                                                                   "None").execute()
+            # ⏳ [신규] 시간 차감형 페널티를 위한 만남 기록 및 시간 조회
+            past_res = supabase.table("attendances").select("seminar_id, team_name, kakao_id, created_at").neq(
+                "team_name", "None").execute()
+            now = get_kst_now()
+
             past_groups = defaultdict(list)
+            seminar_dates = {}
             for p in past_res.data:
-                if p["team_name"]: past_groups[f"{p['seminar_id']}_{p['team_name']}"].append(p["kakao_id"])
-            past_encounters = defaultdict(int)
-            for members in past_groups.values():
+                if p["team_name"]:
+                    key = f"{p['seminar_id']}_{p['team_name']}"
+                    past_groups[key].append(p["kakao_id"])
+                    if key not in seminar_dates:
+                        try:
+                            seminar_dates[key] = datetime.datetime.fromisoformat(p["created_at"].replace('Z', '+00:00'))
+                        except:
+                            seminar_dates[key] = now
+
+            pair_max_penalty = defaultdict(int)
+            for key, members in past_groups.items():
+                days_ago = (now.replace(tzinfo=None) - seminar_dates[key].replace(tzinfo=None)).days
+
+                # 시간 차감 페널티 룰 (1달 지나면 리셋)
+                if days_ago <= 7:
+                    penalty = 50
+                elif days_ago <= 14:
+                    penalty = 30
+                elif days_ago <= 21:
+                    penalty = 15
+                elif days_ago <= 28:
+                    penalty = 5
+                else:
+                    penalty = 1
+
                 for i in range(len(members)):
                     for j in range(i + 1, len(members)):
                         pair = tuple(sorted([members[i], members[j]]))
-                        past_encounters[pair] += 1
+                        pair_max_penalty[pair] = max(pair_max_penalty[pair], penalty)
 
             best_teams, best_score = [], float('inf')
             facs = [a for a in attendees if a["is_fac"]];
@@ -237,15 +265,15 @@ def kakao_bot_main(body: dict):
                 for t in teams:
                     m = sum(1 for x in t if x['gender'] == '남');
                     f = len(t) - m
-                    score += abs(m - f) * 100
+                    score += abs(m - f) * 100  # 성비 불균형 감점
                     for i in range(len(t)):
                         for j in range(i + 1, len(t)):
                             pair = tuple(sorted([t[i]['kakao_id'], t[j]['kakao_id']]))
-                            if pair in past_encounters: score += past_encounters[pair] * 10
+                            score += pair_max_penalty[pair]  # 과거 만남 감점 적용
                 if score < best_score: best_score, best_teams = score, teams
                 if score == 0: break
 
-            report = f"✅ 요청하신 [{target_seminar['week_name']} - {day_choice}] 조 편성이 1만 회 시뮬레이션을 통해 최적화 완료되었습니다!\n\n✨ [조 편성 초안 리포트]\n\n"
+            report = f"✅ 요청하신 [{target_seminar['week_name']} - {day_choice}] 조 편성이 1만 회 시뮬레이션을 통해 최적화 완료되었습니다!\n(성비 및 과거 만남 차감형 페널티 적용됨)\n\n✨ [조 편성 초안 리포트]\n\n"
             for i, team in enumerate(best_teams):
                 t_name = f"{i + 1}조";
                 m = sum(1 for x in t if x['gender'] == '남');
@@ -258,12 +286,12 @@ def kakao_bot_main(body: dict):
                 for idx1 in range(len(team)):
                     for idx2 in range(idx1 + 1, len(team)):
                         pair = tuple(sorted([team[idx1]['kakao_id'], team[idx2]['kakao_id']]))
-                        if pair in past_encounters: warnings.append(
-                            f"{team[idx1]['name']}&{team[idx2]['name']}({past_encounters[pair]}회)")
+                        if pair in pair_max_penalty and pair_max_penalty[pair] > 1:
+                            warnings.append(f"{team[idx1]['name']}&{team[idx2]['name']}")
                 if warnings:
-                    report += f"⚠️ 특이사항: {', '.join(warnings)}\n\n"
+                    report += f"⚠️ 특이사항(최근만남): {', '.join(warnings)}\n\n"
                 else:
-                    report += f"⚠️ 특이사항: 과거 중복자 없음!\n\n"
+                    report += f"⚠️ 특이사항: 최근 중복자 없음!\n\n"
 
                 for m_att in team: supabase.table("attendances").update({"team_name": t_name}).eq("id", m_att[
                     "att_id"]).execute()
@@ -381,7 +409,7 @@ def kakao_bot_main(body: dict):
 
 
 # ==========================================
-# 🌐 웹페이지 라우팅 (이하 코드는 이전과 완전히 동일)
+# 🌐 웹페이지 라우팅
 # ==========================================
 @app.get("/submit_topic", response_class=HTMLResponse)
 def submit_topic_page(request: Request, att_id: int):
@@ -432,23 +460,99 @@ def admin_history_page(request: Request, admin_key: str):
     seminars_res = supabase.table("seminars").select("*").eq("is_active", False).order("created_at", desc=True).limit(
         10).execute()
     seminar_ids = [s["id"] for s in seminars_res.data]
-    if not seminar_ids: return templates.TemplateResponse("admin_history.html",
-                                                          {"request": request, "history_data": []})
+
+    if not seminar_ids:
+        return templates.TemplateResponse("admin_history.html",
+                                          {"request": request, "history_data": [], "admin_key": admin_key})
+
     att_res = supabase.table("attendances").select("*").in_("seminar_id", seminar_ids).eq("status", "attending").neq(
         "team_name", "None").execute()
     kakao_ids = list(set([a["kakao_id"] for a in att_res.data]))
     users_res = supabase.table("users").select("kakao_id, name").in_("kakao_id", kakao_ids).execute()
     user_dict = {u["kakao_id"]: u["name"] for u in users_res.data}
+
     history_data = []
     for sem in seminars_res.data:
-        sem_id = sem["id"];
-        sem_att = [a for a in att_res.data if a["seminar_id"] == sem_id];
+        sem_id = sem["id"]
+        sem_att = [a for a in att_res.data if a["seminar_id"] == sem_id]
         teams = defaultdict(list)
         for att in sem_att:
             teams[att["team_name"]].append(
                 {"name": user_dict.get(att["kakao_id"], "알수없음"), "is_fac": att["is_facilitator"],
-                 "topic": att["topic_content"]})
-        history_data.append({"week": sem["week_name"], "day": sem["day"],
-                             "date": datetime.datetime.fromisoformat(sem["created_at"]).strftime('%Y-%m-%d'),
-                             "teams": dict(sorted(teams.items()))})
-    return templates.TemplateResponse("admin_history.html", {"request": request, "history_data": history_data})
+                 "topic": att["topic_content"]}
+            )
+
+        # ❗ HTML 템플릿에 다운로드 링크를 만들기 위해 sem_id를 함께 넘겨줍니다.
+        history_data.append({
+            "sem_id": sem_id,
+            "week": sem["week_name"],
+            "day": sem["day"],
+            "date": datetime.datetime.fromisoformat(sem["created_at"]).strftime('%Y-%m-%d'),
+            "teams": dict(sorted(teams.items()))
+        })
+
+    return templates.TemplateResponse("admin_history.html",
+                                      {"request": request, "history_data": history_data, "admin_key": admin_key})
+
+
+# ==========================================
+# 📄 [신규] 관리자: 워드(Word) 파일 다운로드 라우터
+# ==========================================
+@app.get("/admin/history/{seminar_id}/download_word")
+def download_topics_word(seminar_id: int, admin_key: str):
+    if admin_key != SUPABASE_KEY[:10]: return HTMLResponse("⛔ 권한 없음")
+    try:
+        seminar_res = supabase.table('seminars').select('*').eq('id', seminar_id).single().execute()
+        seminar = seminar_res.data
+
+        att_res = supabase.table('attendances').select('*').eq('seminar_id', seminar_id).eq('is_facilitator',
+                                                                                            True).execute()
+        users_res = supabase.table('users').select('kakao_id, name, department').in_('kakao_id', [a['kakao_id'] for a in
+                                                                                                  att_res.data]).execute()
+        user_dict = {u['kakao_id']: u for u in users_res.data}
+
+        template_path = os.path.join(app.root_path, 'templates', 'template.docx')
+        if not os.path.exists(template_path):
+            return HTMLResponse("⛔ 템플릿 워드 파일(template.docx)을 templates 폴더에 넣어주세요!", status_code=404)
+
+        doc = DocxTemplate(template_path)
+
+        submissions_list = []
+        for sub in att_res.data:
+            user = user_dict.get(sub['kakao_id'], {})
+            topic_data = sub.get('topic_content', {}) or {}
+
+            topics_list = []
+            for q in topic_data.get('questions', []):
+                if q: topics_list.append({'topic': q, 'page': topic_data.get('range', ''), 'reference': ''})
+
+            submissions_list.append({
+                'department': user.get('department', ''),
+                'author_name': user.get('name', ''),
+                'book_title': topic_data.get('book_title', ''),
+                'book_author': topic_data.get('author', ''),
+                'topics': topics_list
+            })
+
+        context = {
+            'meeting_date': f"{seminar['week_name']} ({seminar['day']})",
+            'book_title': "이번 주 세미나 통합 발제문",
+            'submissions': submissions_list
+        }
+
+        doc.render(context)
+
+        f = BytesIO()
+        doc.save(f)
+        f.seek(0)
+
+        filename = f"발제문_{seminar['week_name']}_{seminar['day']}.docx"
+
+        return StreamingResponse(
+            f,
+            media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            headers={"Content-Disposition": f"attachment; filename={filename.encode('utf-8').decode('latin1')}"}
+        )
+    except Exception as e:
+        print(f"Word download error: {e}")
+        return HTMLResponse("문서 생성 중 오류 발생.")
