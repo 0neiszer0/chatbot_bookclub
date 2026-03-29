@@ -47,7 +47,7 @@ def kakao_bot_main(body: dict):
         user_db = supabase.table("users").select("*").eq("kakao_id", user_id).execute()
         user_info = user_db.data[0] if user_db.data else None
 
-        # 1. 회원가입 로직
+        # 1. 회원가입 로직 (여기는 오픈빌더 파라미터가 정상 작동해야 함)
         if intent_name == "회원가입":
             if user_info:
                 return make_kakao_response(f"✅ 이미 가입된 회원입니다! ({user_info['name']}님)\n\n(정보 수정이 필요하다면 관리자에게 문의해 주세요.)")
@@ -70,17 +70,15 @@ def kakao_bot_main(body: dict):
             )
             return make_kakao_response(success_msg)
 
-        # 2. 유령 회원(미가입자) 방어막
         if not user_info and intent_name in ["참석투표", "투표취소", "내상태", "발제문제출"]:
             return make_kakao_response("⛔ 아직 동아리원으로 등록되지 않았습니다.\n먼저 [회원가입]을 진행해 주세요!")
 
-        # 3. 관리자 전용 권한 방어막
         if intent_name in ["세미나생성", "조편성", "명단확인", "기록열람", "관리자"]:
             if not user_info or user_info.get("role") != "admin":
                 return make_kakao_response("⛔ 운영진(관리자) 전용 기능입니다.")
 
         # ==========================================
-        # 📖 일반 부원 가이드 (도움말)
+        # 📖 일반 부원 가이드
         # ==========================================
         if intent_name == "도움말":
             guide_msg = (
@@ -136,7 +134,7 @@ def kakao_bot_main(body: dict):
 
         elif intent_name == "세미나생성":
             week_name = params.get("week_name", "새로운 주차")
-            now_kst = get_kst_now();
+            now_kst = get_kst_now()
             days_to_friday = (4 - now_kst.weekday()) % 7
             if days_to_friday == 0 and now_kst.hour >= 18: days_to_friday = 7
             open_time = (now_kst + datetime.timedelta(days=days_to_friday)).replace(hour=18, minute=0, second=0)
@@ -188,8 +186,21 @@ def kakao_bot_main(body: dict):
             return make_kakao_response("✅ 과거 기록 열람 페이지가 준비되었습니다.\n\n아래 버튼을 눌러 지난 주차들의 조 편성 및 발제 기록을 편하게 확인하세요!",
                                        replies)
 
+        # 💡 [핵심 스마트 파싱 로직 적용] 조편성
         elif intent_name == "조편성":
-            day_choice = params.get("day_choice")
+            utterance = body.get("userRequest", {}).get("utterance", "")
+            if "월" in utterance:
+                day_choice = "월요일"
+            elif "목" in utterance:
+                day_choice = "목요일"
+            else:
+                # 사용자가 요일을 안 쳤을 때, 직접 만든 퀵 리플라이 버튼 제공
+                replies = [
+                    {"label": "월요일 조편성", "action": "message", "messageText": "월요일 조편성"},
+                    {"label": "목요일 조편성", "action": "message", "messageText": "목요일 조편성"}
+                ]
+                return make_kakao_response("어느 요일 조를 편성할까요?\n아래 버튼을 선택해주세요.", replies)
+
             seminar_res = supabase.table("seminars").select("*").eq("is_active", True).eq("day", day_choice).execute()
             if not seminar_res.data: return make_kakao_response(f"활성화된 {day_choice} 세미나가 없습니다.")
             target_seminar = seminar_res.data[0]
@@ -206,9 +217,9 @@ def kakao_bot_main(body: dict):
                           "gender": user_dict[a["kakao_id"]]["gender"], "is_fac": a.get("is_facilitator", False)} for a
                          in att_res.data if a["kakao_id"] in user_dict]
 
-            # ⏳ [신규] 시간 차감형 페널티를 위한 만남 기록 및 시간 조회
+            forty_days_ago = (get_kst_now() - datetime.timedelta(days=40)).isoformat()
             past_res = supabase.table("attendances").select("seminar_id, team_name, kakao_id, created_at").neq(
-                "team_name", "None").execute()
+                "team_name", "None").gte("created_at", forty_days_ago).execute()
             now = get_kst_now()
 
             past_groups = defaultdict(list)
@@ -227,7 +238,6 @@ def kakao_bot_main(body: dict):
             for key, members in past_groups.items():
                 days_ago = (now.replace(tzinfo=None) - seminar_dates[key].replace(tzinfo=None)).days
 
-                # 시간 차감 페널티 룰 (1달 지나면 리셋)
                 if days_ago <= 7:
                     penalty = 50
                 elif days_ago <= 14:
@@ -265,11 +275,11 @@ def kakao_bot_main(body: dict):
                 for t in teams:
                     m = sum(1 for x in t if x['gender'] == '남');
                     f = len(t) - m
-                    score += abs(m - f) * 100  # 성비 불균형 감점
+                    score += abs(m - f) * 100
                     for i in range(len(t)):
                         for j in range(i + 1, len(t)):
                             pair = tuple(sorted([t[i]['kakao_id'], t[j]['kakao_id']]))
-                            score += pair_max_penalty[pair]  # 과거 만남 감점 적용
+                            score += pair_max_penalty[pair]
                 if score < best_score: best_score, best_teams = score, teams
                 if score == 0: break
 
@@ -303,19 +313,36 @@ def kakao_bot_main(body: dict):
         # ==========================================
         # 🔵 일반 부원 전용 기능들
         # ==========================================
+        # 💡 [핵심 스마트 파싱 로직 적용] 참석투표
         elif intent_name == "참석투표":
-            day_choice = params.get("day_choice")
+            utterance = body.get("userRequest", {}).get("utterance", "")
+            if "월" in utterance:
+                day_choice = "월요일"
+            elif "목" in utterance:
+                day_choice = "목요일"
+            else:
+                # 요일이 없으면 자체 버튼 띄우기
+                replies = [
+                    {"label": "월요일 신청", "action": "message", "messageText": "월요일 참석투표"},
+                    {"label": "목요일 신청", "action": "message", "messageText": "목요일 참석투표"}
+                ]
+                return make_kakao_response("어느 요일 세미나에 참석하시겠습니까?\n아래 버튼을 선택해주세요.", replies)
+
             seminars_res = supabase.table("seminars").select("*").eq("is_active", True).execute()
             if not seminars_res.data: return make_kakao_response("진행 중인 세미나가 없습니다.")
+
             now_str = get_kst_now().isoformat()
             if now_str < seminars_res.data[0]["open_time"]: return make_kakao_response("아직 투표 기간이 아닙니다!")
             if now_str > seminars_res.data[0]["close_time"]: return make_kakao_response("투표가 마감되었습니다.")
+
             active_ids = [s["id"] for s in seminars_res.data]
             existing_vote = supabase.table("attendances").select("*").in_("seminar_id", active_ids).eq("kakao_id",
                                                                                                        user_id).execute()
             if existing_vote.data: return make_kakao_response("이미 투표하셨습니다!\n('내 상태' 버튼을 눌러 확인해 보세요.)")
 
             target_seminar = next((s for s in seminars_res.data if s["day"] == day_choice), None)
+            if not target_seminar: return make_kakao_response(f"활성화된 {day_choice} 세미나가 없습니다.")
+
             attendees = supabase.table("attendances").select("id", count="exact").eq("seminar_id",
                                                                                      target_seminar["id"]).eq("status",
                                                                                                               "attending").execute()
@@ -479,10 +506,8 @@ def admin_history_page(request: Request, admin_key: str):
         for att in sem_att:
             teams[att["team_name"]].append(
                 {"name": user_dict.get(att["kakao_id"], "알수없음"), "is_fac": att["is_facilitator"],
-                 "topic": att["topic_content"]}
-            )
+                 "topic": att["topic_content"]})
 
-        # ❗ HTML 템플릿에 다운로드 링크를 만들기 위해 sem_id를 함께 넘겨줍니다.
         history_data.append({
             "sem_id": sem_id,
             "week": sem["week_name"],
@@ -496,7 +521,7 @@ def admin_history_page(request: Request, admin_key: str):
 
 
 # ==========================================
-# 📄 [신규] 관리자: 워드(Word) 파일 다운로드 라우터
+# 📄 워드(Word) 파일 다운로드 라우터
 # ==========================================
 @app.get("/admin/history/{seminar_id}/download_word")
 def download_topics_word(seminar_id: int, admin_key: str):
